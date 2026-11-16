@@ -30,12 +30,14 @@ import androidx.test.espresso.action.ViewActions.scrollTo
 import androidx.test.espresso.action.ViewActions.typeText
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers
+import androidx.test.espresso.matcher.ViewMatchers.isChecked
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.isEnabled
 import androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility
 import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withInputType
 import androidx.test.espresso.matcher.ViewMatchers.withText
+import eu.opencloud.android.providers.WorkManagerProvider
 import eu.opencloud.android.R
 import eu.opencloud.android.domain.capabilities.model.CapabilityBooleanType
 import eu.opencloud.android.domain.capabilities.model.OCCapability
@@ -50,8 +52,10 @@ import eu.opencloud.android.testutil.OC_FILE
 import eu.opencloud.android.testutil.OC_FOLDER
 import eu.opencloud.android.utils.DateUtils
 import io.mockk.every
+import io.mockk.verify
 import io.mockk.mockk
 import org.hamcrest.CoreMatchers.not
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.koin.android.ext.koin.androidContext
@@ -68,6 +72,13 @@ class PublicShareCreationDialogFragmentTest {
     private val shareViewModel = mockk<ShareViewModel>(relaxed = true)
     private val publicShareCreationStatus = MutableLiveData<Event<UIResult<Unit>>>()
 
+    private var activityScenario: ActivityScenario<TestShareFileActivity>? = null
+
+    @After
+    fun tearDown() {
+        activityScenario?.close()
+    }
+
     @Before
     fun setUp() {
         every { capabilityViewModel.capabilities } returns capabilitiesLiveData
@@ -80,6 +91,7 @@ class PublicShareCreationDialogFragmentTest {
             allowOverride(override = true)
             modules(
                 module {
+                    single { mockk<WorkManagerProvider>(relaxed = true) }
                     viewModel {
                         capabilityViewModel
                     }
@@ -256,7 +268,7 @@ class PublicShareCreationDialogFragmentTest {
     }
 
     @Test
-    fun uploadPermissionsWithFolderNotDisplayed() {
+    fun uploadDisabledKeepsViewAndEditChoicesVisible() {
         loadPublicShareDialogFragment(
             isFolder = true,
             capabilities = OC_CAPABILITY.copy(
@@ -266,7 +278,9 @@ class PublicShareCreationDialogFragmentTest {
             )
         )
 
-        onView(withId(R.id.shareViaLinkEditPermissionGroup)).check(matches(not(isDisplayed())))
+        onView(withId(R.id.shareViaLinkEditPermissionGroup)).check(matches(isDisplayed()))
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).check(matches(not(isEnabled())))
+        onView(withId(R.id.shareViaLinkEditPermissionUploadFiles)).check(matches(not(isDisplayed())))
     }
 
     @Test
@@ -470,11 +484,108 @@ class PublicShareCreationDialogFragmentTest {
         onView(withId(R.id.saveButton)).check(matches(not(isEnabled())))
     }
 
+    @Test
+    fun fileCanViewAndEditWithoutFileDropSupport() {
+        loadPublicShareDialogFragment()
+        onView(withId(R.id.shareViaLinkEditPermissionReadOnly)).check(matches(isDisplayed()))
+        onView(withId(R.id.shareViaLinkEditPermissionReadOnly)).check(matches(isChecked()))
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).check(matches(isEnabled()))
+        onView(withId(R.id.shareViaLinkEditPermissionUploadFiles)).check(matches(not(isDisplayed())))
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).perform(click())
+        onView(withId(R.id.saveButton)).perform(scrollTo(), click())
+        verify {
+            shareViewModel.insertPublicShare(OC_FILE.remotePath, 3, any(), any(), any(), OC_ACCOUNT.name)
+        }
+    }
+
+    @Test
+    fun folderCanEditWithoutFileDropSupportOrServerVersion() {
+        loadPublicShareDialogFragment(
+            isFolder = true,
+            capabilities = OC_CAPABILITY.copy(
+                versionString = "",
+                filesSharingPublicUpload = CapabilityBooleanType.TRUE,
+                filesSharingPublicSupportsUploadOnly = CapabilityBooleanType.FALSE
+            )
+        )
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).check(matches(isEnabled()))
+        onView(withId(R.id.shareViaLinkEditPermissionUploadFiles)).check(matches(not(isDisplayed())))
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).perform(click())
+        onView(withId(R.id.saveButton)).perform(scrollTo(), click())
+        verify {
+            shareViewModel.insertPublicShare(OC_FOLDER.remotePath, 15, any(), any(), any(), OC_ACCOUNT.name)
+        }
+    }
+
+    @Test
+    fun readOnlyFileCannotGrantEditAccess() {
+        loadPublicShareDialogFragment(writable = false)
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).check(matches(not(isEnabled())))
+    }
+
+    @Test
+    fun readOnlyFolderCannotGrantEditOrFileDropAccess() {
+        loadPublicShareDialogFragment(
+            isFolder = true,
+            writable = false,
+            capabilities = OC_CAPABILITY.copy(
+                filesSharingPublicUpload = CapabilityBooleanType.TRUE,
+                filesSharingPublicSupportsUploadOnly = CapabilityBooleanType.TRUE
+            )
+        )
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).check(matches(not(isEnabled())))
+        onView(withId(R.id.shareViaLinkEditPermissionUploadFiles)).check(matches(not(isDisplayed())))
+    }
+
+    @Test
+    fun policyChangePreventsSavingNewlyDisallowedPermissions() {
+        loadPublicShareDialogFragment(
+            isFolder = true,
+            capabilities = OC_CAPABILITY.copy(filesSharingPublicUpload = CapabilityBooleanType.TRUE)
+        )
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).perform(click())
+        capabilitiesLiveData.postValue(Event(UIResult.Success(OC_CAPABILITY)))
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).check(matches(not(isEnabled())))
+        onView(withId(R.id.saveButton)).perform(scrollTo(), click())
+        verify(exactly = 0) { shareViewModel.insertPublicShare(any(), any(), any(), any(), any(), any()) }
+        onView(withId(R.id.public_link_error_message)).check(matches(withText(R.string.share_via_link_permission_unavailable)))
+        onView(withId(R.id.shareViaLinkEditPermissionReadOnly)).perform(scrollTo(), click())
+        onView(withId(R.id.saveButton)).perform(scrollTo(), click())
+        verify { shareViewModel.insertPublicShare(OC_FOLDER.remotePath, 1, any(), any(), any(), OC_ACCOUNT.name) }
+    }
+
+    @Test
+    fun selectedFilePermissionSurvivesRecreation() {
+        val scenario = loadPublicShareDialogFragment()
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).perform(click())
+        scenario.recreate()
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).check(matches(isChecked()))
+        onView(withId(R.id.saveButton)).perform(scrollTo(), click())
+        verify {
+            shareViewModel.insertPublicShare(OC_FILE.remotePath, 3, any(), any(), any(), OC_ACCOUNT.name)
+        }
+    }
+
+    @Test
+    fun globalPasswordPolicyStillAppliesAfterSwitchingPermission() {
+        loadPublicShareDialogFragment(
+            capabilities = OC_CAPABILITY.copy(filesSharingPublicPasswordEnforced = CapabilityBooleanType.TRUE)
+        )
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).perform(scrollTo(), click())
+        onView(withId(R.id.shareViaLinkPasswordSwitch)).check(matches(not(isDisplayed())))
+        onView(withId(R.id.saveButton)).check(matches(not(isEnabled())))
+    }
+
     private fun loadPublicShareDialogFragment(
         isFolder: Boolean = false,
-        capabilities: OCCapability = OC_CAPABILITY
-    ) {
-        val file = if (isFolder) OC_FOLDER else OC_FILE
+        capabilities: OCCapability = OC_CAPABILITY,
+        writable: Boolean = true
+    ): ActivityScenario<TestShareFileActivity> {
+        val file = if (isFolder) {
+            OC_FOLDER.copy(permissions = if (writable) OC_FOLDER.permissions else "R")
+        } else {
+            OC_FILE.copy(permissions = if (writable) "RW" else "R")
+        }
 
         val publicShareDialogFragment = PublicShareDialogFragment.newInstanceToCreate(
             file,
@@ -482,12 +593,14 @@ class PublicShareCreationDialogFragmentTest {
             "DOC_12112018.jpg link"
         )
 
-        ActivityScenario.launch(TestShareFileActivity::class.java).onActivity {
+        val scenario = ActivityScenario.launch(TestShareFileActivity::class.java).onActivity {
             it.startFragment(publicShareDialogFragment)
         }
 
         capabilitiesLiveData.postValue(
             Event(UIResult.Success(capabilities))
         )
+        activityScenario = scenario
+        return scenario
     }
 }

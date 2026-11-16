@@ -74,6 +74,14 @@
                     android:layout_height="wrap_content"
                     android:text="@string/share_via_link_edit_permission_upload_only_label" />
 
+                <RadioButton
+                    android:id="@+id/shareViaLinkEditPermissionCustom"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:enabled="false"
+                    android:visibility="gone"
+                    android:text="@string/share_via_link_edit_permission_custom_label" />
+
             </RadioGroup>
 
             <RelativeLayout

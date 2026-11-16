@@ -23,6 +23,8 @@ import androidx.lifecycle.MutableLiveData
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.action.ViewActions.scrollTo
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers
 import androidx.test.espresso.matcher.ViewMatchers.Visibility.VISIBLE
@@ -31,6 +33,7 @@ import androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility
 import androidx.test.espresso.matcher.ViewMatchers.withHint
 import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
+import eu.opencloud.android.providers.WorkManagerProvider
 import eu.opencloud.android.R
 import eu.opencloud.android.domain.capabilities.model.OCCapability
 import eu.opencloud.android.domain.sharing.shares.model.ShareType
@@ -40,11 +43,14 @@ import eu.opencloud.android.presentation.common.UIResult
 import eu.opencloud.android.presentation.sharing.shares.PublicShareDialogFragment
 import eu.opencloud.android.presentation.capabilities.CapabilityViewModel
 import eu.opencloud.android.presentation.sharing.ShareViewModel
+import eu.opencloud.android.testutil.OC_CAPABILITY
 import eu.opencloud.android.testutil.OC_ACCOUNT
 import eu.opencloud.android.testutil.OC_FILE
 import eu.opencloud.android.testutil.OC_SHARE
 import io.mockk.every
+import io.mockk.verify
 import io.mockk.mockk
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.koin.android.ext.koin.androidContext
@@ -62,6 +68,8 @@ class PublicShareEditionDialogFragmentTest {
     private val capabilitiesLiveData = MutableLiveData<Event<UIResult<OCCapability>>>()
     private val shareViewModel = mockk<ShareViewModel>(relaxed = true)
 
+    private var scenario: ActivityScenario<TestShareFileActivity>? = null
+
     private val expirationDate = 1556575200000 // GMT: Monday, April 29, 2019 10:00:00 PM
 
     @Before
@@ -75,6 +83,7 @@ class PublicShareEditionDialogFragmentTest {
             allowOverride(override = true)
             modules(
                 module {
+                    single { mockk<WorkManagerProvider>(relaxed = true) }
                     viewModel {
                         capabilityViewModel
                     }
@@ -98,9 +107,61 @@ class PublicShareEditionDialogFragmentTest {
             )
         )
 
-        ActivityScenario.launch(TestShareFileActivity::class.java).onActivity {
+        scenario = ActivityScenario.launch(TestShareFileActivity::class.java).onActivity {
             it.startFragment(publicShareDialogFragment)
         }
+    }
+
+    @After
+    fun tearDown() {
+        scenario?.close()
+    }
+
+    private fun loadFileShare(permissions: Int) {
+        scenario?.close()
+        val fragment = PublicShareDialogFragment.newInstanceToUpdate(
+            OC_FILE.copy(permissions = "RW"),
+            OC_ACCOUNT,
+            OC_SHARE.copy(
+                shareType = ShareType.PUBLIC_LINK,
+                shareWith = "",
+                permissions = permissions,
+                expirationDate = 0,
+                isFolder = false
+            )
+        )
+        scenario = ActivityScenario.launch(TestShareFileActivity::class.java).onActivity {
+            capabilitiesLiveData.value = Event(UIResult.Success(OC_CAPABILITY))
+            it.startFragment(fragment)
+        }
+    }
+
+    @Test
+    fun webFileEditPermissionIsRestoredAndPreserved() {
+        loadFileShare(permissions = 3)
+        onView(withId(R.id.shareViaLinkEditPermissionReadAndWrite)).check(matches(isChecked()))
+        onView(withId(R.id.saveButton)).perform(scrollTo(), click())
+        verify { shareViewModel.updatePublicShare(OC_SHARE.remoteId, any(), any(), any(), 3, OC_ACCOUNT.name) }
+    }
+
+    @Test
+    fun customPermissionsArePreservedWhenSavingOtherSettings() {
+        loadFileShare(permissions = 5)
+        onView(withId(R.id.shareViaLinkEditPermissionCustom)).check(matches(isChecked()))
+        scenario?.recreate()
+        onView(withId(R.id.shareViaLinkEditPermissionCustom)).check(matches(isChecked()))
+        onView(withId(R.id.saveButton)).perform(scrollTo(), click())
+        verify { shareViewModel.updatePublicShare(OC_SHARE.remoteId, any(), any(), any(), 5, OC_ACCOUNT.name) }
+    }
+
+    @Test
+    fun existingFileEditLinkCanBeChangedToViewOnly() {
+        loadFileShare(permissions = 3)
+        onView(withId(R.id.shareViaLinkEditPermissionReadOnly)).perform(click())
+        capabilitiesLiveData.postValue(Event(UIResult.Success(OC_CAPABILITY)))
+        onView(withId(R.id.shareViaLinkEditPermissionReadOnly)).check(matches(isChecked()))
+        onView(withId(R.id.saveButton)).perform(scrollTo(), click())
+        verify { shareViewModel.updatePublicShare(OC_SHARE.remoteId, any(), any(), any(), 1, OC_ACCOUNT.name) }
     }
 
     @Test

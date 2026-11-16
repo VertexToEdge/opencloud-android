@@ -59,7 +59,6 @@ import eu.opencloud.android.extensions.parseError
 import eu.opencloud.android.extensions.setAccessibilityRole
 import eu.opencloud.android.extensions.showMessageInSnackbar
 import eu.opencloud.android.lib.resources.shares.RemoteShare
-import eu.opencloud.android.lib.resources.status.OpenCloudVersion
 import eu.opencloud.android.presentation.capabilities.CapabilityViewModel
 import eu.opencloud.android.presentation.common.UIResult
 import eu.opencloud.android.presentation.sharing.ShareFragmentListener
@@ -101,6 +100,8 @@ class PublicShareDialogFragment : DialogFragment() {
      * Capabilities of the server
      */
     private var capabilities: OCCapability? = null
+
+    private var selectedPermissions = RemoteShare.READ_PERMISSION_FLAG
 
     /**
      * Listener for changes in password switch
@@ -181,6 +182,9 @@ class PublicShareDialogFragment : DialogFragment() {
             "Both ARG_FILE and ARG_SHARE cannot be NULL"
         }
 
+        selectedPermissions = savedInstanceState?.getInt(KEY_PERMISSIONS, publicShare?.permissions ?: RemoteShare.READ_PERMISSION_FLAG)
+            ?: publicShare?.permissions ?: RemoteShare.READ_PERMISSION_FLAG
+
         setStyle(STYLE_NO_TITLE, 0)
     }
 
@@ -214,6 +218,8 @@ class PublicShareDialogFragment : DialogFragment() {
         }
 
         initTitleAndLabels()
+        initPermissionSelection()
+        updatePermissionOptions()
         initPasswordListener()
         initExpirationListener()
         initPasswordFocusChangeListener()
@@ -239,17 +245,6 @@ class PublicShareDialogFragment : DialogFragment() {
             binding.publicShareDialogTitle.setText(R.string.share_via_link_edit_title)
             binding.shareViaLinkNameValue.setText(publicShare?.name)
 
-            when (publicShare?.permissions) {
-                RemoteShare.CREATE_PERMISSION_FLAG
-                        or RemoteShare.DELETE_PERMISSION_FLAG
-                        or RemoteShare.UPDATE_PERMISSION_FLAG
-                        or RemoteShare.READ_PERMISSION_FLAG ->
-                    binding.shareViaLinkEditPermissionReadAndWrite.isChecked = true
-
-                RemoteShare.CREATE_PERMISSION_FLAG -> binding.shareViaLinkEditPermissionUploadFiles.isChecked = true
-                else -> binding.shareViaLinkEditPermissionReadOnly.isChecked = true
-            }
-
             if (publicShare?.isPasswordProtected == true) {
                 setPasswordSwitchChecked()
                 binding.shareViaLinkPasswordValue.isVisible = true
@@ -271,38 +266,25 @@ class PublicShareDialogFragment : DialogFragment() {
     }
 
     private fun onSaveShareSetting() {
+        val canSavePermissions = publicShare?.permissions == selectedPermissions ||
+            when (PublicLinkPermission.fromPermissions(selectedPermissions, isSharedFolder)) {
+                PublicLinkPermission.VIEW -> true
+                PublicLinkPermission.EDIT -> binding.shareViaLinkEditPermissionReadAndWrite.isEnabled
+                PublicLinkPermission.UPLOAD_ONLY -> binding.shareViaLinkEditPermissionUploadFiles.isEnabled
+                null -> false
+            }
+        if (!canSavePermissions) {
+            binding.publicLinkErrorMessage.setText(R.string.share_via_link_permission_unavailable)
+            binding.publicLinkErrorMessage.isVisible = true
+            return
+        }
+
         // Get data filled by user
         val publicLinkName = binding.shareViaLinkNameValue.text.toString()
         var publicLinkPassword: String? = binding.shareViaLinkPasswordValue.text.toString()
         val publicLinkExpirationDateInMillis = expirationDateValueInMillis
 
-        val publicLinkPermissions: Int
-        val publicUploadPermission: Boolean
-
-        when (binding.shareViaLinkEditPermissionGroup.checkedRadioButtonId) {
-            R.id.shareViaLinkEditPermissionUploadFiles -> {
-                publicLinkPermissions = RemoteShare.CREATE_PERMISSION_FLAG
-                publicUploadPermission = true
-            }
-
-            R.id.shareViaLinkEditPermissionReadAndWrite -> {
-                publicLinkPermissions = (RemoteShare.CREATE_PERMISSION_FLAG
-                        or RemoteShare.DELETE_PERMISSION_FLAG
-                        or RemoteShare.UPDATE_PERMISSION_FLAG
-                        or RemoteShare.READ_PERMISSION_FLAG)
-                publicUploadPermission = true
-            }
-
-            R.id.shareViaLinkEditPermissionReadOnly -> {
-                publicLinkPermissions = RemoteShare.READ_PERMISSION_FLAG
-                publicUploadPermission = false
-            }
-
-            else -> {
-                publicLinkPermissions = RemoteShare.READ_PERMISSION_FLAG
-                publicUploadPermission = false
-            }
-        }
+        val publicLinkPermissions = selectedPermissions
 
         if (!updating()) { // Creating a new public share
             shareViewModel.insertPublicShare(
@@ -599,6 +581,7 @@ class PublicShareDialogFragment : DialogFragment() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString(KEY_EXPIRATION_DATE, binding.shareViaLinkExpirationValue.text.toString())
+        outState.putInt(KEY_PERMISSIONS, selectedPermissions)
     }
 
     override fun onAttach(context: Context) {
@@ -818,29 +801,12 @@ class PublicShareDialogFragment : DialogFragment() {
      * - set the default value for expiration date if defined (only if creating a new share).
      */
     private fun updateInputFormAccordingToServerCapabilities() {
-        val serverVersion = capabilities?.versionString?.let {
-            OpenCloudVersion(it, it) // FIXME: check productversion as second parameter, not versionstring
-        }
-
         // Show keyboard to fill the public share name
         dialog?.window?.setSoftInputMode(
             WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         )
 
-        if (capabilities?.filesSharingPublicUpload == CapabilityBooleanType.TRUE && isSharedFolder) {
-            binding.shareViaLinkEditPermissionGroup.isVisible = true
-        }
-
-        // Show file listing option if all the following is true:
-        //  - The file to share is a folder
-        //  - Upload only is supported by the server version
-        //  - Upload only capability is set
-        //  - Allow editing capability is set
-        if (!(isSharedFolder && serverVersion?.isPublicSharingWriteOnlySupported == true &&
-                    capabilities?.filesSharingPublicSupportsUploadOnly == CapabilityBooleanType.TRUE &&
-                    capabilities?.filesSharingPublicUpload == CapabilityBooleanType.TRUE)) {
-            binding.shareViaLinkEditPermissionGroup.isVisible = false
-        }
+        updatePermissionOptions()
 
         // Show default date enforced by the server, if any
         if (!updating() && capabilities?.filesSharingPublicExpireDateDays ?: 0 > 0) {
@@ -868,48 +834,7 @@ class PublicShareDialogFragment : DialogFragment() {
             )
         }
 
-        // Set password label when opening the dialog
-        if (isReadOnlyPermission() || isReadAndWritePermission() ||
-            binding.shareViaLinkEditPermissionUploadFiles.isChecked &&
-            capabilities?.filesSharingPublicPasswordEnforcedUploadOnly == CapabilityBooleanType.TRUE) {
-            setPasswordEnforced()
-        }
-
-        // Set password label depending on the checked permission option
-        binding.shareViaLinkEditPermissionGroup.setOnCheckedChangeListener { _, checkedId ->
-            binding.publicLinkErrorMessage.isVisible = false
-
-            if (checkedId == binding.shareViaLinkEditPermissionReadOnly.id) {
-                if (capabilities?.filesSharingPublicPasswordEnforcedReadOnly == CapabilityBooleanType.TRUE) {
-                    setPasswordEnforced()
-                } else {
-                    setPasswordNotEnforced()
-                }
-            } else if (checkedId == binding.shareViaLinkEditPermissionReadAndWrite.id) {
-                if (capabilities?.filesSharingPublicPasswordEnforcedReadWrite == CapabilityBooleanType.TRUE) {
-                    setPasswordEnforced()
-                } else {
-                    setPasswordNotEnforced()
-                }
-            } else if (checkedId == binding.shareViaLinkEditPermissionUploadFiles.id) {
-                if (capabilities?.filesSharingPublicPasswordEnforcedUploadOnly == CapabilityBooleanType.TRUE) {
-                    setPasswordEnforced()
-                } else {
-                    setPasswordNotEnforced()
-                }
-            }
-        }
-
-        // When there's no password enforced for capability
-        val hasPasswordEnforcedFor =
-            capabilities?.filesSharingPublicPasswordEnforcedReadOnly == CapabilityBooleanType.TRUE ||
-                    capabilities?.filesSharingPublicPasswordEnforcedReadWrite == CapabilityBooleanType.TRUE ||
-                    capabilities?.filesSharingPublicPasswordEnforcedUploadOnly == CapabilityBooleanType.TRUE
-
-        // hide password switch if password is enforced to prevent it is removed
-        if (!hasPasswordEnforcedFor && capabilities?.filesSharingPublicPasswordEnforced == CapabilityBooleanType.TRUE) {
-            setPasswordEnforced()
-        }
+        updatePasswordEnforcement()
 
         capabilities?.passwordPolicy?.let { passwordPolicy ->
             binding.generatePasswordButton.setOnClickListener {
@@ -928,11 +853,65 @@ class PublicShareDialogFragment : DialogFragment() {
         }
     }
 
-    private fun isReadOnlyPermission() = binding.shareViaLinkEditPermissionReadOnly.isChecked &&
-                capabilities?.filesSharingPublicPasswordEnforcedReadOnly == CapabilityBooleanType.TRUE
+    private fun initPermissionSelection() {
+        val option = PublicLinkPermission.fromPermissions(selectedPermissions, isSharedFolder)
+        binding.shareViaLinkEditPermissionGroup.check(
+            when (option) {
+                PublicLinkPermission.VIEW -> R.id.shareViaLinkEditPermissionReadOnly
+                PublicLinkPermission.EDIT -> R.id.shareViaLinkEditPermissionReadAndWrite
+                PublicLinkPermission.UPLOAD_ONLY -> R.id.shareViaLinkEditPermissionUploadFiles
+                null -> R.id.shareViaLinkEditPermissionCustom
+            }
+        )
+        binding.shareViaLinkEditPermissionCustom.isVisible = option == null
+        binding.shareViaLinkEditPermissionGroup.setOnCheckedChangeListener { _, checkedId ->
+            val permission = when (checkedId) {
+                R.id.shareViaLinkEditPermissionReadOnly -> PublicLinkPermission.VIEW
+                R.id.shareViaLinkEditPermissionReadAndWrite -> PublicLinkPermission.EDIT
+                R.id.shareViaLinkEditPermissionUploadFiles -> PublicLinkPermission.UPLOAD_ONLY
+                else -> return@setOnCheckedChangeListener
+            }
+            selectedPermissions = permission.permissions(isSharedFolder)
+            binding.publicLinkErrorMessage.isVisible = false
+            updatePasswordEnforcement()
+        }
+    }
 
-    private fun isReadAndWritePermission() = binding.shareViaLinkEditPermissionReadAndWrite.isChecked &&
-            capabilities?.filesSharingPublicPasswordEnforcedReadWrite == CapabilityBooleanType.TRUE
+    private fun updatePermissionOptions() {
+        // Public uploads and file drops are independent of the basic view/edit choices.
+        val publicUploadAllowed = capabilities?.filesSharingPublicUpload == CapabilityBooleanType.TRUE
+        val canEdit = capabilities != null && if (isSharedFolder) {
+            publicUploadAllowed && file?.hasAddFilePermission == true && file?.hasAddSubdirectoriesPermission == true
+        } else {
+            file?.hasWritePermission == true
+        }
+        val canUploadOnly = publicUploadAllowed && isSharedFolder && file?.hasAddFilePermission == true &&
+            capabilities?.filesSharingPublicSupportsUploadOnly == CapabilityBooleanType.TRUE
+        binding.shareViaLinkEditPermissionReadAndWrite.isEnabled = canEdit
+        binding.shareViaLinkEditPermissionUploadFiles.apply {
+            // Keep an existing file-drop selection visible even when the policy has changed.
+            isVisible = canUploadOnly || (isSharedFolder && selectedPermissions == RemoteShare.CREATE_PERMISSION_FLAG)
+            isEnabled = canUploadOnly
+        }
+    }
+
+    private fun updatePasswordEnforcement() {
+        val enforcedForSelection = when (PublicLinkPermission.fromPermissions(selectedPermissions, isSharedFolder)) {
+            PublicLinkPermission.VIEW -> capabilities?.filesSharingPublicPasswordEnforcedReadOnly
+            PublicLinkPermission.EDIT -> capabilities?.filesSharingPublicPasswordEnforcedReadWrite
+            PublicLinkPermission.UPLOAD_ONLY -> capabilities?.filesSharingPublicPasswordEnforcedUploadOnly
+            null -> null
+        } == CapabilityBooleanType.TRUE
+        val hasSpecificPolicy = capabilities?.filesSharingPublicPasswordEnforcedReadOnly == CapabilityBooleanType.TRUE ||
+            capabilities?.filesSharingPublicPasswordEnforcedReadWrite == CapabilityBooleanType.TRUE ||
+            capabilities?.filesSharingPublicPasswordEnforcedUploadOnly == CapabilityBooleanType.TRUE
+        val globallyEnforced = !hasSpecificPolicy && capabilities?.filesSharingPublicPasswordEnforced == CapabilityBooleanType.TRUE
+        if (enforcedForSelection || globallyEnforced) {
+            setPasswordEnforced()
+        } else {
+            setPasswordNotEnforced()
+        }
+    }
 
     private fun setPasswordNotEnforced() {
         binding.shareViaLinkPasswordLabel.text = getString(R.string.share_via_link_password_label)
@@ -991,6 +970,7 @@ class PublicShareDialogFragment : DialogFragment() {
         private const val ARG_SHARE = "SHARE"
         private const val ARG_ACCOUNT = "ACCOUNT"
         private const val ARG_DEFAULT_LINK_NAME = "DEFAULT_LINK_NAME"
+        private const val KEY_PERMISSIONS = "PERMISSIONS"
         private const val KEY_EXPIRATION_DATE = "EXPIRATION_DATE"
         private const val SPECIALS_CHARACTERS = "!#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 

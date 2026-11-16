@@ -125,6 +125,32 @@ class ShareRemoteOperationTest {
     }
 
     @Test
+    fun publicLinkPermissionsAreSentForCreationAndUpdates() {
+        for (permissions in listOf(1, 3, 15, 4)) {
+            server.enqueue(MockResponse().setResponseCode(200).setBody(shareResponseJson(id = "12", permissions = permissions)))
+            val created = CreateRemoteShareOperation(
+                remoteFilePath = "/Photos",
+                shareType = ShareType.PUBLIC_LINK,
+                shareWith = "",
+                permissions = permissions
+            ).execute(newClient())
+            assertTrue(created.isSuccess)
+            assertEquals(permissions, created.data.shares.first().permissions)
+            val createForm = server.takeRequest().formBody()
+            assertEquals("3", createForm["shareType"])
+            assertEquals(permissions.toString(), createForm["permissions"])
+
+            server.enqueue(MockResponse().setResponseCode(200).setBody(shareResponseJson(id = "12", permissions = permissions)))
+            val updated = UpdateRemoteShareOperation(remoteId = "12").apply {
+                this.permissions = permissions
+            }.execute(newClient())
+            assertTrue(updated.isSuccess)
+            assertEquals(permissions, updated.data.shares.first().permissions)
+            assertEquals(permissions.toString(), server.takeRequest().formBody()["permissions"])
+        }
+    }
+
+    @Test
     fun createShare_returnsUnsuccessfulResultForServerError() {
         server.enqueue(MockResponse().setResponseCode(500).setBody("server error"))
 
